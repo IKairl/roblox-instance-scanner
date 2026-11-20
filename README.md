@@ -1,192 +1,96 @@
 
-            if query ~= "" then
+--[[
+    INSTANCE SCANNER v0.4
+    Explorer-style Instance Browser
 
-                if descendantMatches then
-                    RenderRecords(
-                        record.Children,
-                        depth + 1,
-                        query
-                    )
-                end
+    Features:
+    - Recursive instance scanning
+    - Expandable hierarchy
+    - Recursive descendant search
+    - Automatic scrolling canvas sizing
+    - Refresh button
+    - Instance property inspection
+    - Manual-copy information window
+    - Periodic yielding during large scans
+    - Minimize / restore control
+    - Resizable window
 
-            elseif isExpanded then
-
-                RenderRecords(
-                    record.Children,
-                    depth + 1,
-                    ""
-                )
-
-            end
-
-        end
-
-    end
-
-end
+    Read-only inspection tool.
+]]
 
 --==================================================
--- SCAN FUNCTION
+-- SERVICES
 --==================================================
 
-local function PerformScan()
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
 
-    if IsScanning then
-        return
-    end
-
-    IsScanning = true
-
-    Footer.Text = "Scanning accessible instances..."
-
-    RefreshButton.Text = "SCANNING"
-    RefreshButton.Active = false
-    RefreshButton.AutoButtonColor = false
-
-    table.clear(ScanData)
-    table.clear(Expanded)
-
-    SelectedRecord = nil
-    PropertyInfo.Text = "Select an instance to inspect."
-
-    TotalScanned = 0
-
-    task.spawn(function()
-
-        local success, result = pcall(function()
-
-            return ScanRecursive(
-                CONFIG.ScanRoot,
-                1
-            )
-
-        end)
-
-        if success then
-
-            ScanData = result
-
-            ClearExplorer()
-
-            RenderRecords(
-                ScanData,
-                1,
-                SearchBox.Text
-            )
-
-            Footer.Text =
-                "Scan complete | " ..
-                tostring(TotalScanned) ..
-                " instances discovered"
-
-        else
-
-            Footer.Text = "Scan failed: " .. tostring(result)
-
-        end
-
-        IsScanning = false
-
-        RefreshButton.Text = "REFRESH"
-        RefreshButton.Active = true
-        RefreshButton.AutoButtonColor = true
-
-    end)
-
-end
+local LocalPlayer = Players.LocalPlayer
 
 --==================================================
--- SEARCH EVENT
+-- CONFIGURATION
 --==================================================
 
-SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+local CONFIG = {
+    ScanRoot = workspace,
+    MaxDepth = 30,
 
-    ClearExplorer()
+    WindowWidth = 650,
+    WindowHeight = 430,
+    MinWindowWidth = 520,
+    MinWindowHeight = 320,
+    MaxWindowWidth = 1100,
+    MaxWindowHeight = 850,
 
-    RenderRecords(
-        ScanData,
-        1,
-        SearchBox.Text
-    )
+    Background = Color3.fromRGB(25, 27, 33),
+    Secondary = Color3.fromRGB(35, 38, 46),
+    Accent = Color3.fromRGB(65, 130, 230),
+    Text = Color3.fromRGB(235, 235, 235),
+    Muted = Color3.fromRGB(155, 160, 170),
 
-end)
-
---==================================================
--- REFRESH EVENT
---==================================================
-
-RefreshButton.MouseButton1Click:Connect(function()
-    PerformScan()
-end)
-
---==================================================
--- MANUAL COPY EVENT
---==================================================
-
-CopyButton.MouseButton1Click:Connect(function()
-
-    if not SelectedRecord then
-        Footer.Text = "Select an instance first."
-        return
-    end
-
-    local record = SelectedRecord
-
-    local copyText =
-        "Name: " .. record.Name ..
-        "\nClass: " .. record.ClassName ..
-        "\nPath: " .. record.FullName ..
-        "\nChildren: " .. tostring(#record.Children) ..
-        "\nDepth: " .. tostring(record.Depth)
-
-    CopyTextBox.Text = copyText
-    CopyWindow.Visible = true
-
-    Footer.Text = "Information window opened."
-
-    task.defer(function()
-        CopyTextBox:CaptureFocus()
-        CopyTextBox.CursorPosition = 1
-    end)
-
-end)
-
-CloseCopy.MouseButton1Click:Connect(function()
-
-    CopyWindow.Visible = false
-    CopyTextBox:ReleaseFocus()
-
-end)
-
---==================================================
--- MINIMIZE / RESTORE
---==================================================
-
-local ContentObjects = {
-    SearchBox,
-    RefreshButton,
-    Explorer,
-    Properties,
-    Footer,
-    ResizeGrip,
+    RowHeight = 25,
+    ScanYieldInterval = 150,
 }
 
-MinimizeButton.MouseButton1Click:Connect(function()
-    IsMinimized = not IsMinimized
+--==================================================
+-- REMOVE PREVIOUS GUI
+--==================================================
 
-    if IsMinimized then
-        -- Preserve the most recent expanded dimensions before collapsing.
-        ExpandedSize = Main.Size
+pcall(function()
+    local old = CoreGui:FindFirstChild("InstanceScanner")
+    if old then old:Destroy() end
+end)
 
-        for _, object in ipairs(ContentObjects) do
-            object.Visible = false
-        end
+pcall(function()
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if playerGui then
+        local old = playerGui:FindFirstChild("InstanceScanner")
+        if old then old:Destroy() end
+    end
+end)
 
-        CopyWindow.Visible = false
-        Main.Size = UDim2.fromOffset(ExpandedSize.X.Offset, 42)
-        MinimizeButton.Text = "+"
-        MinimizeButton.TextSize = 15
-    else
-        Main.Size = ExpandedSize
+--==================================================
+-- STATE
+--==================================================
 
-        for _, object in ipairs(ContentObjects) do
+local ScanData = {}
+local SelectedRecord = nil
+local Expanded = {}
+local RowObjects = {}
+
+local TotalScanned = 0
+local IsScanning = false
+local RenderOrder = 0
+
+local IsMinimized = false
+local ExpandedSize = UDim2.fromOffset(CONFIG.WindowWidth, CONFIG.WindowHeight)
+
+--==================================================
+-- GUI CREATION
+--==================================================
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "InstanceScanner"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
